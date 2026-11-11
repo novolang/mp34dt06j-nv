@@ -1,0 +1,151 @@
+/* record.nv: a program that records one second of sound from an MP34DT06J
+ * into a buffer and prints its peak and its RMS level
+ *
+ * Build:  bash tests/device_build.sh   (the package's own script)
+ *         or make this file the main of a package that depends on
+ *         mp34dt06j-nv and run
+ *             novo build --target=nrf52840-dk src/main.nv
+ * Run:    probe-rs run --chip nRF52840_xxAA main.elf
+ *
+ * NOT a `novo run` program: it targets a board and never ends.
+ *
+ * The part is an MP34DT06J on a breakout board, wired to the board's PDM
+ * pins: CLK from the board, DOUT to the board's PDM data input, L/R to ground
+ * (the left channel, read on the falling edge), VDD to 3.3 V and GND.  The
+ * board drives a PDM clock of 1.28 MHz, inside the part's range of 1.2 to
+ * 3.25 MHz, and decimates by 80 to 16-bit samples at 16 kHz.  A line looks
+ * like
+ *
+ *     peak 4210 rms 812 of 32768
+ *
+ * where the last number is the full scale of the 16-bit sample.  In a quiet
+ * room the peak is a few hundred; speaking next to the part drives it up by a
+ * factor of ten or more.  The part's sensitivity is -26 dBFS at 94 dB SPL
+ * (ST's page gives +-1 dB), and its acoustic overload point 122.5 dB SPL.
+ *
+ * The program reads the microphone through devices-nv's `Microphone` trait:
+ * `mic_start` configures the PDM block and starts the clock and answers how
+ * long the part takes to be sound, the program waits that long, and `mic_read`
+ * answers 128 samples at a time into a buffer of 16,000, one second.
+ *
+ * Effects the program declares: [hw], for the PDM block, the UART and the
+ * timer, and [mutate] for the buffer, a module-level heapless vector of
+ * 32,000 bytes in .bss.  The driver allocates one cell at `attach`; the
+ * program allocates nothing after it starts.
+ *
+ * The PDM block: neither the nRF52840-DK's nor the nRF54LM20-DK's board
+ * package has a PDM driver, and embedded-hal-nv has no board handle for one;
+ * no board package in the repository implements `PdmIn`.  The program is
+ * therefore written against the `PdmIn` trait and is given `NoPdm`, a
+ * stand-in that refuses to be configured, so the program builds for both
+ * boards and prints "refused" at run time.  A board package that gives a
+ * handle implementing `PdmIn` replaces the one argument of `attach`.  The
+ * part has not been read on a board.
+ */
+use embedded_hal.{ PdmIn, PdmConfig }
+use dev_audio.{ Microphone }
+use mp34dt06j
+
+// The stand-in for a board's PDM block that is not there.
+@value
+struct NoPdm
+    id: Int
+
+impl PdmIn for NoPdm
+    fn configure(self, c: PdmConfig) -> Bool [hw]
+        false
+
+    fn sample_rate(self) -> Int [hw]
+        0
+
+    fn enable(self) -> Bool [hw]
+        false
+
+    fn disable(self) [hw]
+        pass
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        -1
+
+    fn xruns(self) -> Int [hw]
+        0
+
+// One second of 16-bit samples at 16 kHz.
+var rec: Vec[i16; 16000] = Vec.new()
+
+// Writes `n`, 0 or more, in decimal.  Formatting into a string would
+// allocate, which @tier(embedded) refuses, so each digit goes out as a
+// byte.  An Int has at most 19 decimal digits, which bounds both loops.
+@tier(embedded)
+fn digits(n: Int) [hw]
+    var div = 1
+    for _k in 0..18
+        if div <= n / 10
+            div = div * 10
+    for _k in 0..19
+        if div > 0
+            hal.uart.write_byte(48 + n / div % 10)
+            div = div / 10
+
+// The integer square root of `n` up to 2^30, by a binary search over 0 to
+// 32768.
+@tier(embedded)
+fn isqrt(n: Int) -> Int
+    var lo = 0
+    var hi = 32768
+    for _i in 0..17
+        let mid = (lo + hi + 1) / 2
+        if mid * mid <= n
+            lo = mid
+        else
+            hi = mid - 1
+    lo
+
+// The largest magnitude among the samples of the buffer.
+@tier(embedded)
+fn peak_of() -> Int [mutate]
+    var peak = 0
+    for i in 0..rec.len()
+        var v = rec[i] as Int
+        if v < 0
+            v = 0 - v
+        if v > peak
+            peak = v
+    peak
+
+// The root of the mean of the squares of the samples of the buffer.
+@tier(embedded)
+fn rms_of() -> Int [mutate]
+    var sum = 0
+    for i in 0..rec.len()
+        let v = rec[i] as Int
+        sum = sum + v * v
+    isqrt(sum / rec.len())
+
+@tier(embedded)
+fn main() [hw, mutate]
+    bsp.board.init()
+    let mic = mp34dt06j.attach(NoPdm { id: 0 }, mp34dt06j.config_left())
+    let settle_us = mic.mic_start()
+    if settle_us < 0
+        hal.uart.write("refused\n")
+    else
+        hal.timer.delay_ms(settle_us / 1000 + 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    while true
+        rec.clear()
+        for _c in 0..125
+            let n = mic.mic_read(var buf, 128)
+            if n > 0
+                for i in 0..n
+                    let _ = rec.push(buf[i] as i16)
+        if rec.len() == 16000
+            hal.uart.write("peak ")
+            digits(peak_of())
+            hal.uart.write(" rms ")
+            digits(rms_of())
+            hal.uart.write(" of ")
+            digits(32768)
+            hal.uart.write("\n")
+        else
+            hal.timer.delay_ms(500)

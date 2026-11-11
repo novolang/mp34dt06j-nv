@@ -1,0 +1,338 @@
+// mp34dt06j_tests — the package over a double of the board's PDM input.
+//
+// The double records what the driver configured and answers a scripted ramp
+// of samples: the sample at position `p` of the stream is `3 * p - 100`.  The
+// expected numbers below are derived by hand from the data sheet's clock range
+// and the trait's rules and not by calling the function being checked.
+//
+// The double's state, in `st`: 0 configure calls, 1 clock, 2 sample rate, 3
+// channels, 4 edge (0 left on the falling edge, 1 on the rising edge), 6
+// enabled, 7 read position, 8 refuse configure, 9 xruns, 10 disable calls, 11
+// receive calls, 12 samples asked by the last receive, 13 refuse enable, 14 1
+// when a receive answers one sample short, 15 the rate read back.
+
+use std.test
+use embedded_hal.{ PdmIn, PdmInAsync, PdmConfig, PdmEdge }
+use dev_audio.{ AudioFormat, AudioFraming, Microphone, MicrophoneAsync, MilliDb }
+use mp34dt06j
+use mp34dt06j.{ Mp34Config }
+
+struct Pdm
+    st: HashMap<Int, Int>
+
+fn at(m: HashMap<Int, Int>, k: Int) -> Int
+    m.get(k) ?? 0
+
+@tier(app)
+fn pdm() -> Pdm
+    Pdm { st: HashMap.new() }
+
+impl PdmIn for Pdm
+    fn configure(self, c: PdmConfig) -> Bool [hw]
+        self.st.insert(0, at(self.st, 0) + 1)
+        if at(self.st, 8) == 1
+            return false
+        self.st.insert(1, c.clock_hz)
+        self.st.insert(2, c.sample_rate)
+        self.st.insert(3, c.channels)
+        if c.edge == PdmEdge.PdmLeftFalling
+            self.st.insert(4, 0)
+        else
+            self.st.insert(4, 1)
+        true
+
+    fn sample_rate(self) -> Int [hw]
+        at(self.st, 15)
+
+    fn enable(self) -> Bool [hw]
+        if at(self.st, 13) == 1
+            return false
+        self.st.insert(6, 1)
+        true
+
+    fn disable(self) [hw]
+        self.st.insert(6, 0)
+        self.st.insert(10, at(self.st, 10) + 1)
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        if at(self.st, 6) == 0 or n > 256
+            return -1
+        self.st.insert(11, at(self.st, 11) + 1)
+        self.st.insert(12, n)
+        if at(self.st, 14) == 1
+            return n - 1
+        buf.clear()
+        let pos = at(self.st, 7)
+        for k in 0..n
+            let _ = buf.push((3 * (pos + k) - 100) as i32)
+        self.st.insert(7, pos + n)
+        n
+
+    fn xruns(self) -> Int [hw]
+        at(self.st, 9)
+
+impl PdmInAsync for Pdm
+    @tier(app)
+    async fn receive(self, n: Int) -> [i32] [hw]
+        var out: [i32] = []
+        if at(self.st, 6) == 0
+            return out
+        var want = n
+        if at(self.st, 14) == 1
+            want = n - 1
+        let pos = at(self.st, 7)
+        for k in 0..want
+            list.push(out, (3 * (pos + k) - 100) as i32)
+        self.st.insert(7, pos + want)
+        out
+
+// ── The configurations ───────────────────────────────────────────────
+
+@test
+fn test_the_three_configurations_share_the_clock_and_the_rate() [io]
+    let l = mp34dt06j.config_left()
+    test.assert_eq(l.clock_hz, 1280000)
+    test.assert_eq(l.sample_rate, 16000)
+    test.assert_eq(l.channels, 1)
+    test.assert(not l.right)
+    test.assert_eq(l.startup_ms, 10)
+    let r = mp34dt06j.config_right()
+    test.assert(r.right)
+    test.assert_eq(r.channels, 1)
+    test.assert_eq(r.clock_hz, 1280000)
+    let p = mp34dt06j.config_pair()
+    test.assert_eq(p.channels, 2)
+    test.assert_eq(p.sample_rate, 16000)
+
+@test
+fn test_the_clock_range_is_1_2_to_3_25_mhz_and_below_it_is_low_power() [io]
+    test.assert(not mp34dt06j.clock_ok(1199999))
+    test.assert(mp34dt06j.clock_ok(1200000))
+    test.assert(mp34dt06j.clock_ok(3250000))
+    test.assert(not mp34dt06j.clock_ok(3250001))
+    test.assert(mp34dt06j.clock_low_power(1032000))
+    test.assert(mp34dt06j.clock_low_power(1199999))
+    test.assert(not mp34dt06j.clock_low_power(1200000))
+    test.assert(not mp34dt06j.clock_low_power(0))
+    test.assert(not mp34dt06j.clock_low_power(-5))
+
+@test
+fn test_the_edge_follows_the_l_r_pin_and_a_pair_is_read_from_the_falling_edge() [io]
+    test.assert(mp34dt06j.edge_of(mp34dt06j.config_left()) == PdmEdge.PdmLeftFalling)
+    test.assert(mp34dt06j.edge_of(mp34dt06j.config_right()) == PdmEdge.PdmLeftRising)
+    test.assert(mp34dt06j.edge_of(mp34dt06j.config_pair()) == PdmEdge.PdmLeftFalling)
+    let odd = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 2, right: true, startup_ms: 10 }
+    test.assert(mp34dt06j.edge_of(odd) == PdmEdge.PdmLeftFalling)
+
+@test
+fn test_the_handle_settings_are_the_clock_the_rate_the_channels_and_the_edge() [io]
+    let c = mp34dt06j.pdm_config_of(mp34dt06j.config_right())
+    test.assert_eq(c.clock_hz, 1280000)
+    test.assert_eq(c.sample_rate, 16000)
+    test.assert_eq(c.channels, 1)
+    test.assert(c.edge == PdmEdge.PdmLeftRising)
+
+@test
+fn test_a_configuration_needs_a_clock_in_range_that_is_a_multiple_of_the_rate() [io]
+    test.assert(mp34dt06j.config_valid(mp34dt06j.config_left()))
+    test.assert(mp34dt06j.config_valid(mp34dt06j.config_pair()))
+    let slow = Mp34Config { clock_hz: 1024000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
+    test.assert(not mp34dt06j.config_valid(slow))
+    let fast = Mp34Config { clock_hz: 3300000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
+    test.assert(not mp34dt06j.config_valid(fast))
+    let odd = Mp34Config { clock_hz: 1280000, sample_rate: 15000, channels: 1, right: false, startup_ms: 10 }
+    test.assert(not mp34dt06j.config_valid(odd))
+    let three = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 3, right: false, startup_ms: 10 }
+    test.assert(not mp34dt06j.config_valid(three))
+    let early = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 1, right: false, startup_ms: -1 }
+    test.assert(not mp34dt06j.config_valid(early))
+    let high = Mp34Config { clock_hz: 2400000, sample_rate: 48000, channels: 2, right: false, startup_ms: 10 }
+    test.assert(mp34dt06j.config_valid(high))
+
+@test
+fn test_the_decimation_is_the_clock_over_the_rate() [io]
+    test.assert_eq(mp34dt06j.decimation(mp34dt06j.config_left()), 80)
+    let high = Mp34Config { clock_hz: 2400000, sample_rate: 48000, channels: 2, right: false, startup_ms: 10 }
+    test.assert_eq(mp34dt06j.decimation(high), 50)
+    let slow = Mp34Config { clock_hz: 1024000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
+    test.assert_eq(mp34dt06j.decimation(slow), 0)
+
+@test
+fn test_the_format_is_16_bits_at_the_rate_with_the_channels_of_the_link() [io]
+    let f = mp34dt06j.format_of(mp34dt06j.config_pair())
+    test.assert_eq(f.sample_rate, 16000)
+    test.assert_eq(f.bit_depth, 16)
+    test.assert_eq(f.channels, 2)
+    test.assert(not f.codec_is_master)
+    test.assert_eq(mp34dt06j.format_of(mp34dt06j.config_left()).channels, 1)
+
+@test
+fn test_the_startup_time_is_in_microseconds() [io]
+    test.assert_eq(mp34dt06j.startup_us(mp34dt06j.config_left()), 10000)
+    let c = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 1, right: false, startup_ms: 25 }
+    test.assert_eq(mp34dt06j.startup_us(c), 25000)
+
+// ── The start and the read ───────────────────────────────────────────
+
+@test
+fn test_start_configures_the_handle_and_starts_the_clock() [io, hw]
+    let p = pdm()
+    test.assert_eq(mp34dt06j.pdm_start(p, mp34dt06j.config_left()), 10000)
+    test.assert_eq(at(p.st, 0), 1)
+    test.assert_eq(at(p.st, 1), 1280000)
+    test.assert_eq(at(p.st, 2), 16000)
+    test.assert_eq(at(p.st, 3), 1)
+    test.assert_eq(at(p.st, 4), 0)
+    test.assert_eq(at(p.st, 6), 1)
+
+@test
+fn test_start_passes_the_rising_edge_for_l_r_high() [io, hw]
+    let p = pdm()
+    test.assert_eq(mp34dt06j.pdm_start(p, mp34dt06j.config_right()), 10000)
+    test.assert_eq(at(p.st, 4), 1)
+    let q = pdm()
+    test.assert_eq(mp34dt06j.pdm_start(q, mp34dt06j.config_pair()), 10000)
+    test.assert_eq(at(q.st, 3), 2)
+    test.assert_eq(at(q.st, 4), 0)
+
+@test
+fn test_start_refuses_a_clock_outside_the_range_without_touching_the_handle() [io, hw]
+    let p = pdm()
+    let slow = Mp34Config { clock_hz: 1024000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
+    test.assert_eq(mp34dt06j.pdm_start(p, slow), -1)
+    test.assert_eq(at(p.st, 0), 0)
+    test.assert_eq(at(p.st, 6), 0)
+
+@test
+fn test_start_answers_minus_one_when_the_handle_refuses() [io, hw]
+    let p = pdm()
+    p.st.insert(8, 1)
+    test.assert_eq(mp34dt06j.pdm_start(p, mp34dt06j.config_left()), -1)
+    test.assert_eq(at(p.st, 6), 0)
+    p.st.insert(8, 0)
+    p.st.insert(13, 1)
+    test.assert_eq(mp34dt06j.pdm_start(p, mp34dt06j.config_left()), -1)
+    test.assert_eq(at(p.st, 0), 2)
+
+@test
+fn test_a_read_returns_the_handles_samples_and_advances() [io, hw]
+    let p = pdm()
+    let c = mp34dt06j.config_left()
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 4), 4)
+    test.assert_eq(buf.len(), 4)
+    test.assert_eq(buf[0] as Int, -100)
+    test.assert_eq(buf[1] as Int, -97)
+    test.assert_eq(buf[3] as Int, -91)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 256), 256)
+    test.assert_eq(buf.len(), 256)
+    test.assert_eq(buf[0] as Int, -88)
+    test.assert_eq(at(p.st, 12), 256)
+
+@test
+fn test_a_read_before_the_start_or_past_the_buffer_is_refused_and_leaves_it_empty() [io, hw]
+    let p = pdm()
+    let c = mp34dt06j.config_left()
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(7 as i32)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 4), -1)
+    test.assert_eq(buf.len(), 0)
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 257), -1)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, -1), -1)
+    test.assert_eq(at(p.st, 11), 0)
+
+@test
+fn test_a_stereo_read_of_an_odd_count_is_refused_before_the_handle() [io, hw]
+    let p = pdm()
+    let c = mp34dt06j.config_pair()
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 5), -1)
+    test.assert_eq(at(p.st, 11), 0)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 6), 6)
+    test.assert_eq(mp34dt06j.pdm_read(p, mp34dt06j.config_left(), var buf, 5), 5)
+
+@test
+fn test_a_short_answer_is_a_refusal_with_an_empty_buffer() [io, hw]
+    let p = pdm()
+    let c = mp34dt06j.config_left()
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    p.st.insert(14, 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(7 as i32)
+    test.assert_eq(mp34dt06j.pdm_read(p, c, var buf, 8), -1)
+    test.assert_eq(buf.len(), 0)
+
+// ── The type ─────────────────────────────────────────────────────────
+
+@test
+fn test_the_microphone_trait_over_the_handle() [io, hw]
+    let p = pdm()
+    let m = mp34dt06j.attach(p, mp34dt06j.config_left())
+    test.assert_eq(m.mic_format().bit_depth, 16)
+    test.assert_eq(m.mic_format().sample_rate, 16000)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert_eq(m.mic_read(var buf, 4), -1)
+    test.assert_eq(m.mic_start(), 10000)
+    test.assert_eq(at(p.st, 6), 1)
+    test.assert_eq(m.mic_read(var buf, 8), 8)
+    test.assert_eq(buf[7] as Int, -79)
+    p.st.insert(9, 3)
+    test.assert_eq(m.mic_lost(), 3)
+    p.st.insert(15, 16000)
+    test.assert_eq(m.actual_rate(), 16000)
+    m.mic_stop()
+    test.assert_eq(at(p.st, 6), 0)
+    test.assert_eq(at(p.st, 10), 1)
+    test.assert_eq(m.mic_read(var buf, 4), -1)
+
+@test
+fn test_the_gain_is_the_traits_none_because_the_handle_exposes_none() [io, hw]
+    let m = mp34dt06j.attach(pdm(), mp34dt06j.config_left())
+    test.assert(m.mic_set_gain(MilliDb { mdb: 6000 }) == None)
+
+@test
+fn test_the_type_keeps_its_configuration_and_refuses_a_bad_clock() [io, hw]
+    let slow = Mp34Config { clock_hz: 1032000, sample_rate: 16125, channels: 1, right: false, startup_ms: 10 }
+    let m = mp34dt06j.attach(pdm(), slow)
+    test.assert_eq(m.config().clock_hz, 1032000)
+    test.assert_eq(m.mic_start(), -1)
+
+// ── The host scheduler's async form ──────────────────────────────────
+
+@test
+fn test_the_async_form_answers_the_samples_the_handle_has() [io, hw, async]
+    let p = pdm()
+    let c = mp34dt06j.config_left()
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    let h = mp34dt06j.host_of(p, c)
+    let xs = await h.mic_capture(4)
+    match xs
+        Some(v) =>
+            test.assert_eq(v.len(), 4)
+            test.assert_eq(v[0] as Int, -100)
+            test.assert_eq(v[3] as Int, -91)
+        None    => test.assert(false)
+
+@test
+fn test_the_async_form_answers_none_before_the_start_and_for_a_bad_count() [io, hw, async]
+    let p = pdm()
+    let c = mp34dt06j.config_left()
+    let h = mp34dt06j.host_of(p, c)
+    test.assert(await h.mic_capture(4) == None)
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    test.assert(await h.mic_capture(0) == None)
+    test.assert(await h.mic_capture(257) == None)
+    p.st.insert(14, 1)
+    test.assert(await h.mic_capture(4) == None)
+
+@test
+fn test_the_async_form_of_a_pair_refuses_an_odd_count() [io, hw, async]
+    let p = pdm()
+    let c = mp34dt06j.config_pair()
+    test.assert_eq(mp34dt06j.pdm_start(p, c), 10000)
+    let h = mp34dt06j.host_of(p, c)
+    test.assert(await h.mic_capture(3) == None)
+    test.assert(await h.mic_capture(4) != None)

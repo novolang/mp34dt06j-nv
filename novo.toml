@@ -1,0 +1,34 @@
+[package]
+name        = "mp34dt06j-nv"
+version     = "0.1.0"
+description = "A driver for ST's MP34DT06J, a MEMS microphone with a PDM output and no control bus, over a board's PDM input: the clock range of 1.2 to 3.25 MHz, the L/R pin as the clock edge the channel is valid on, the decimation to 16-bit PCM that the board's PDM block does, the start-up time before the data is sound, and the sync and async forms, as devices-nv's Microphone and MicrophoneAsync."
+license     = "Apache-2.0"
+stability   = "experimental"
+category    = "embedded"
+layer       = "host"
+tags        = ["mp34dt06j", "st", "stmicroelectronics", "microphone", "mems", "pdm", "audio", "nrf52840-dk", "nrf54lm20-dk"]
+repository  = "https://github.com/novolang/mp34dt06j-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.24.1"
+
+[docs.pages]
+"README.md" = "Capturing sound from an MP34DT06J on a PDM input"
+
+# Every module of the package checks at the embedded tier, so a program
+# of any tier, embedded, rt or system, may call it.  The async form is the
+# one function and one impl the host scheduler needs, and they are marked
+# for the app tier.
+[tier]
+tier = "embedded"
+
+# The device program, examples/record.nv, has no [[bin]] entry: an entry
+# makes the registry list the package as a program.  tests/device_build.sh
+# builds the program for two boards as the main of a scratch package that
+# depends on this one.
+
+[dependencies]
+# The PdmIn and PdmInAsync traits and the settings the input is configured
+# with.
+embedded-hal-nv = "^0.3.3"
+# The Microphone and MicrophoneAsync traits and the AudioFormat they answer.
+devices-nv      = "^0.3.3"

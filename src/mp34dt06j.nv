@@ -1,0 +1,254 @@
+// mp34dt06j — ST's MP34DT06J, a MEMS microphone with a PDM output and no
+// control bus, as devices-nv's `Microphone` and `MicrophoneAsync`.
+//
+// The facts below are from ST's data sheet for the MP34DT06J, "MEMS audio
+// sensor omnidirectional digital microphone", document DS12698, Rev 2,
+// April 2019, as far as it could be read.  ST's site would not serve the file
+// to this package's tools, and the copies on the mirrors came back empty or
+// behind a bot check, so the facts below are the ones that ST's product page
+// and the search excerpts of the data sheet state: the pins, the supply of 1.6
+// to 3.6 V, the clock of 1.2 to 3.25 MHz in normal mode with a low-power mode
+// below it, a sensitivity of -26 dBFS (+-1 dB on ST's page, +-3 dB on a
+// distributor's), a signal to noise ratio of 64 dB(A), an acoustic overload
+// point of 122.5 dBSPL, and a typical current of 650 uA.  The timing table
+// could not be read, so three things are marked as the driver's own choice:
+// which clock edge the L/R pin selects, the turn-on time, and the behaviour
+// of the data line in the low-power mode.  The reference code was read for
+// its fixes and not ported: Zephyr's `dmic_nrfx_pdm` driver, which drives the
+// nRF PDM block, and ST's X-CUBE-MEMSMIC1 examples for the part.
+//
+// A microphone with no registers has no driver in the usual sense.  What a
+// program needs from the package is the description of the PDM link the
+// board's `PdmIn` handle has to be set to, and the arithmetic that checks it:
+//
+//   * The part is a PDM source: it gets the clock CLK and sends one bit per
+//     clock on DOUT, whose density follows the sound.  The board's PDM
+//     peripheral drives the clock, filters and decimates the bits to 16-bit
+//     PCM at a lower rate, and hands the samples back.  This package
+//     configures the clock and the channel through the handle and passes the
+//     samples on; it does not decimate.  The decimation ratio is the clock
+//     over the sample rate (`PdmConfig` requires the clock to be a whole
+//     multiple of the rate).
+//   * The clock is 1.2 to 3.25 MHz in normal mode.  Below 1.2 MHz the part is
+//     in its low-power mode, in which the data sheet gives no use as a
+//     microphone, so the driver refuses such a clock.  That matters on the nRF
+//     parts, whose PDM block offers 1.032 and 1.067 MHz, both below the range,
+//     and 1.231, 1.280 and 1.333 MHz, which are in it.  The default is 1.28
+//     MHz at 16 kHz, a ratio of 80, which the nRF block has.
+//   * The L/R pin gives the channel.  The part drives DOUT for one half of
+//     the clock period and leaves it high impedance for the other half, so
+//     that two microphones can share one data line.  With L/R low the data
+//     is valid on one edge and with L/R high on the other; the board's block
+//     takes the edge on which the left channel is valid (`PdmEdge`) and reads
+//     the other as the right.  The driver takes L/R low as the left channel
+//     on the falling edge, which is the convention of ST's microphones of
+//     this family (Zephyr's driver also takes the falling edge as the left
+//     channel); a single microphone on L/R high is read as a mono left
+//     channel on the rising edge.  This is not checked against the timing
+//     table.
+//   * Start-up.  The output is not sound until the part has had its clock for
+//     its turn-on time, and the samples before it are the part's settling and
+//     the decimation filter's fill, not audio.  ST's examples start the clock
+//     and discard the first buffers.  `mic_start` answers the time in
+//     microseconds, and the program waits it out before it reads.  The data
+//     sheet's turn-on time could not be read, and the driver's default of 10
+//     ms is an assumption (the family's order); it is a field of the
+//     configuration so that a program with the number sets it.
+//   * The gain.  The part has a fixed sensitivity.  The nRF PDM block has a
+//     digital gain of -20 to +20 dB in 0.5 dB steps, which Zephyr sets, but
+//     `PdmIn` exposes no gain, so `mic_set_gain` keeps the trait's body, `None`.
+//
+// The `Microphone` trait holds the part's state in the `PdmIn` handle: a
+// `self` receiver cannot change a field.  The reading of "not started" is
+// therefore the handle's, which refuses a `receive` before `enable`; the lost
+// buffers are the handle's `xruns`.
+
+use embedded_hal.{ PdmIn, PdmInAsync, PdmConfig, PdmEdge }
+use dev_audio.{ AudioFormat, AudioFraming, Microphone, MicrophoneAsync }
+
+// The clock range of normal mode, in hertz.
+let CLOCK_MIN_HZ = 1200000
+let CLOCK_MAX_HZ = 3250000
+
+// The most samples one read returns: a buffer of the trait.
+let BUFFER_SAMPLES = 256
+
+// The bits of a PCM sample the handle answers.
+let SAMPLE_BITS = 16
+
+// What a program says about the link it wired.
+//
+// `clock_hz` is the PDM clock the board drives to the microphone, and
+// `sample_rate` the rate of the PCM samples the board hands back, the clock
+// over a decimation ratio.  `channels` is 1 for one microphone and 2 for a
+// pair on one data line, one with L/R low and one with it high.  `right` is
+// whether the single microphone has L/R high, which is read on the rising
+// edge; it is not used for a pair.  `startup_ms` is the time from the first
+// clock to a sound output, in milliseconds.
+pub @value
+struct Mp34Config
+    clock_hz: Int
+    sample_rate: Int
+    channels: Int
+    right: Bool
+    startup_ms: Int
+
+// One microphone with L/R low, at 16 kHz from a 1.28 MHz clock (a ratio of
+// 80).
+pub fn config_left() -> Mp34Config
+    Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
+
+// One microphone with L/R high, the same clock and rate.
+pub fn config_right() -> Mp34Config
+    Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 1, right: true, startup_ms: 10 }
+
+// Two microphones on one data line, the left with L/R low and the right with
+// it high, the same clock and rate.
+pub fn config_pair() -> Mp34Config
+    Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 2, right: false, startup_ms: 10 }
+
+// ── The link ─────────────────────────────────────────────────────────
+
+// Whether a clock is in the part's normal mode, 1.2 to 3.25 MHz.
+pub fn clock_ok(hz: Int) -> Bool
+    hz >= CLOCK_MIN_HZ and hz <= CLOCK_MAX_HZ
+
+// Whether a clock is below the range, where the part is in its low-power
+// mode.
+pub fn clock_low_power(hz: Int) -> Bool
+    hz > 0 and hz < CLOCK_MIN_HZ
+
+// The edge of the clock on which the board's block reads the left channel: the
+// falling edge for a pair and for one microphone with L/R low, the rising edge
+// for one microphone with L/R high.
+pub fn edge_of(c: Mp34Config) -> PdmEdge
+    if c.channels == 1 and c.right
+        return PdmEdge.PdmLeftRising
+    PdmEdge.PdmLeftFalling
+
+// The settings the board's `PdmIn` handle gets.
+pub fn pdm_config_of(c: Mp34Config) -> PdmConfig
+    PdmConfig { clock_hz: c.clock_hz, sample_rate: c.sample_rate, channels: c.channels,
+                edge: edge_of(c) }
+
+// Whether a configuration is one the part and the handle's trait accept: a
+// clock in the part's range that is a whole multiple of the rate, one or two
+// channels, and a start-up time that is not negative.
+pub fn config_valid(c: Mp34Config) -> Bool
+    clock_ok(c.clock_hz) and embedded_hal.pdm_config_valid(pdm_config_of(c)) and c.startup_ms >= 0
+
+// The decimation ratio: the clock over the rate; 0 for a configuration that
+// is not valid.
+pub fn decimation(c: Mp34Config) -> Int
+    if not config_valid(c)
+        return 0
+    embedded_hal.pdm_decimation(pdm_config_of(c))
+
+// The format of the samples the microphone delivers: 16 bits, the rate of the
+// configuration, the channels of the link.  The framing names no I2S edge;
+// `AudioPhilips` is the value a driver without a serial port reports.
+pub fn format_of(c: Mp34Config) -> AudioFormat
+    AudioFormat { sample_rate: c.sample_rate, bit_depth: SAMPLE_BITS, channels: c.channels,
+                  framing: AudioFraming.AudioPhilips, codec_is_master: false }
+
+// How long until the output is sound, in microseconds.
+pub fn startup_us(c: Mp34Config) -> Int
+    c.startup_ms * 1000
+
+// ── The part on a PDM input ──────────────────────────────────────────
+
+// Configures the handle for the link and starts its clock: the microseconds
+// until the output is sound, or -1 when the configuration is not valid or the
+// handle refused it.  The clock runs from the `enable`, and the samples are
+// not sound until the time has passed.
+pub fn pdm_start<S: PdmIn>(pdm: S, c: Mp34Config) -> Int [hw]
+    if not config_valid(c)
+        return -1
+    if not pdm.configure(pdm_config_of(c))
+        return -1
+    if not pdm.enable()
+        return -1
+    startup_us(c)
+
+// Replaces `buf` with `n` samples from the handle: `n`, or -1 when the read
+// was refused (not started, `n` above 256, or a stereo read of an odd count,
+// which would split a frame).  `buf` is empty on a refusal.
+pub fn pdm_read<S: PdmIn>(pdm: S, c: Mp34Config, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+    buf.clear()
+    if n < 0 or n > BUFFER_SAMPLES or c.channels == 2 and n % 2 != 0
+        return -1
+    if pdm.receive(var buf, n) != n
+        buf.clear()
+        return -1
+    n
+
+// A microphone on the board's `PdmIn` handle.  The handle is configured and
+// enabled by `mic_start` and disabled by `mic_stop`.
+pub struct Mp34dt06j<S: PdmIn>
+    pdm: S
+    cfg: Mp34Config
+
+// The microphone configured by `cfg` on `pdm`.  Nothing is sent.  A struct
+// with a generic field cannot be a `@value`, so the microphone is one cell of
+// the arena, built here in a `system` block, the one allocation of the
+// package; it is released when the last reference to it goes.
+pub fn attach<S: PdmIn>(pdm: S, cfg: Mp34Config) -> Mp34dt06j<S>
+    system
+        return Mp34dt06j { pdm: pdm, cfg: cfg }
+
+impl Mp34dt06j
+    // The configuration.
+    fn config(self) -> Mp34Config
+        self.cfg
+
+    // The sample rate the handle runs at, read back from its dividers: it
+    // differs from the request by the handle's rounding, and is 0 before a
+    // start that was taken.
+    fn actual_rate(self) -> Int [hw]
+        self.pdm.sample_rate()
+
+impl Microphone[hw] for Mp34dt06j
+    fn mic_format(self) -> AudioFormat [hw]
+        format_of(self.cfg)
+
+    // Configures the handle and starts its clock, and answers the
+    // microseconds until the output is sound, or -1.
+    fn mic_start(self) -> Int [hw]
+        pdm_start(self.pdm, self.cfg)
+
+    fn mic_stop(self) [hw]
+        self.pdm.disable()
+
+    fn mic_read(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        pdm_read(self.pdm, self.cfg, var buf, n)
+
+    fn mic_lost(self) -> Int [hw]
+        self.pdm.xruns()
+
+// ── The host scheduler's async form ──────────────────────────────────
+
+// A microphone on a host's scheduler, which implements `MicrophoneAsync`: the
+// capture parks the task until the handle has the samples.  The handle is
+// configured and started with `pdm_start`, through the sync trait that the
+// async one is beside.  The struct is not a `@value` struct, since an `async
+// fn` takes none and a struct with a generic field cannot be one; `host_of`
+// builds it as one cell of the arena.  The impl is `@tier(app)`: an `async fn`
+// is refused at the embedded tier.
+pub struct Mp34Host<S: PdmInAsync>
+    pdm: S
+    cfg: Mp34Config
+
+// The host-scheduler form of the microphone on `pdm`.
+pub @tier(app)
+fn host_of<S: PdmInAsync>(pdm: S, cfg: Mp34Config) -> Mp34Host<S>
+    Mp34Host { pdm: pdm, cfg: cfg }
+
+impl MicrophoneAsync[hw] for Mp34Host
+    @tier(app)
+    async fn mic_capture(self, n: Int) -> ?[i32] [hw]
+        if n <= 0 or n > BUFFER_SAMPLES or self.cfg.channels == 2 and n % 2 != 0
+            return None
+        let xs = await self.pdm.receive(n)
+        if xs.len() != n
+            return None
+        Some(xs)
