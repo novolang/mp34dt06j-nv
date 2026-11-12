@@ -25,13 +25,13 @@ cp "$PKG/examples/record.nv" "$WORK/src/main.nv"
 cat > "$WORK/novo.toml" <<EOF
 [package]
 name    = "mp34dt06j-nv-device"
-version = "0.1.0"
+version = "0.1.1"
 main    = "src/main.nv"
 
 [dependencies]
 mp34dt06j-nv = { path = "$PKG" }
-devices-nv      = { path = "$PKG/../devices-nv" }
-embedded-hal-nv = { path = "$PKG/../embedded-hal-nv" }
+devices-nv      = "^0.4.0"
+embedded-hal-nv = "^0.4.0"
 EOF
 
 fail=0

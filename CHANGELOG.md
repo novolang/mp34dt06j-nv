@@ -1,9 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-11-12
 
-Moves off its stand-ins onto devices-nv 0.4.0 and embedded-hal-nv 0.4.0, which
-are path dependencies until they are published.
+Moves off its stand-ins onto devices-nv 0.4.0 and embedded-hal-nv 0.4.0. The release depends on both.
 
 - `mic_set_gain` passes the request to `PdmIn.set_gain` and answers the step the
   handle took, where 0.1.0 answered `None`.

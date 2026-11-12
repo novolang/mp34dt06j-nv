@@ -1,6 +1,6 @@
 [package]
 name        = "mp34dt06j-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "A driver for ST's MP34DT06J, a MEMS microphone with a PDM output and no control bus, over a board's PDM input: the clock range of 1.2 to 3.25 MHz, the L/R pin as the clock edge the channel is valid on, the decimation to 16-bit PCM that the board's PDM block does, the start-up time before the data is sound, and the sync and async forms, as devices-nv's Microphone and MicrophoneAsync."
 license     = "Apache-2.0"
 stability   = "experimental"
