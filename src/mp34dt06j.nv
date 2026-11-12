@@ -27,8 +27,9 @@
 //     PCM at a lower rate, and hands the samples back.  This package
 //     configures the clock and the channel through the handle and passes the
 //     samples on; it does not decimate.  The decimation ratio is the clock
-//     over the sample rate (`PdmConfig` requires the clock to be a whole
-//     multiple of the rate).
+//     over the sample rate, rounded down; the clock need not be a whole
+//     multiple of the rate (`PdmConfig`'s rule since embedded-hal-nv 0.4.0),
+//     and `actual_rate` reads back the rate the handle ran at.
 //   * The clock is 1.2 to 3.25 MHz in normal mode.  Below 1.2 MHz the part is
 //     in its low-power mode, in which the data sheet gives no use as a
 //     microphone, so the driver refuses such a clock.  That matters on the nRF
@@ -55,8 +56,9 @@
 //     ms is an assumption (the family's order); it is a field of the
 //     configuration so that a program with the number sets it.
 //   * The gain.  The part has a fixed sensitivity.  The nRF PDM block has a
-//     digital gain of -20 to +20 dB in 0.5 dB steps, which Zephyr sets, but
-//     `PdmIn` exposes no gain, so `mic_set_gain` keeps the trait's body, `None`.
+//     digital gain of -20 to +20 dB in 0.5 dB steps, which Zephyr sets;
+//     embedded-hal-nv 0.4.0's `PdmIn.set_gain` exposes it, and `mic_set_gain`
+//     passes the request on.  A handle with no gain stage answers `None`.
 //
 // The `Microphone` trait holds the part's state in the `PdmIn` handle: a
 // `self` receiver cannot change a field.  The reading of "not started" is
@@ -64,7 +66,7 @@
 // buffers are the handle's `xruns`.
 
 use embedded_hal.{ PdmIn, PdmInAsync, PdmConfig, PdmEdge }
-use dev_audio.{ AudioFormat, AudioFraming, Microphone, MicrophoneAsync }
+use dev_audio.{ AudioFormat, AudioFraming, Microphone, MicrophoneAsync, MilliDb }
 
 // The clock range of normal mode, in hertz.
 let CLOCK_MIN_HZ = 1200000
@@ -132,24 +134,24 @@ pub fn pdm_config_of(c: Mp34Config) -> PdmConfig
                 edge: edge_of(c) }
 
 // Whether a configuration is one the part and the handle's trait accept: a
-// clock in the part's range that is a whole multiple of the rate, one or two
+// clock in the part's range and at least twice the rate, one or two
 // channels, and a start-up time that is not negative.
 pub fn config_valid(c: Mp34Config) -> Bool
     clock_ok(c.clock_hz) and embedded_hal.pdm_config_valid(pdm_config_of(c)) and c.startup_ms >= 0
 
-// The decimation ratio: the clock over the rate; 0 for a configuration that
-// is not valid.
+// The decimation ratio: the clock over the rate, rounded down; 0 for a
+// configuration that is not valid.
 pub fn decimation(c: Mp34Config) -> Int
     if not config_valid(c)
         return 0
     embedded_hal.pdm_decimation(pdm_config_of(c))
 
 // The format of the samples the microphone delivers: 16 bits, the rate of the
-// configuration, the channels of the link.  The framing names no I2S edge;
-// `AudioPhilips` is the value a driver without a serial port reports.
+// configuration, the channels of the link.  The framing is `AudioPdm`, the
+// one-bit stream the handle decimates, and the slot is as wide as the sample.
 pub fn format_of(c: Mp34Config) -> AudioFormat
     AudioFormat { sample_rate: c.sample_rate, bit_depth: SAMPLE_BITS, channels: c.channels,
-                  framing: AudioFraming.AudioPhilips, codec_is_master: false }
+                  slot_bits: 0, framing: AudioFraming.AudioPdm, codec_is_master: false }
 
 // How long until the output is sound, in microseconds.
 pub fn startup_us(c: Mp34Config) -> Int
@@ -224,6 +226,13 @@ impl Microphone[hw] for Mp34dt06j
 
     fn mic_lost(self) -> Int [hw]
         self.pdm.xruns()
+
+    // The gain of the handle's PDM block, to the step at or below `g`, or
+    // `None` for a handle with no gain stage.
+    fn mic_set_gain(self, g: MilliDb) -> ?MilliDb [hw]
+        match self.pdm.set_gain(g.mdb)
+            Some(mdb) => Some(MilliDb { mdb: mdb })
+            None      => None
 
 // ── The host scheduler's async form ──────────────────────────────────
 

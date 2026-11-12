@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Moves off its stand-ins onto devices-nv 0.4.0 and embedded-hal-nv 0.4.0, which
+are path dependencies until they are published.
+
+- `mic_set_gain` passes the request to `PdmIn.set_gain` and answers the step the
+  handle took, where 0.1.0 answered `None`.
+- `mic_format` reports the framing `AudioPdm` and `slot_bits: 0`, where 0.1.0
+  reported `AudioPhilips`.
+- A clock that is not a whole multiple of the rate is accepted so long as it is
+  at least twice the rate; `decimation` rounds down. 0.1.0 refused it.
+
 ## 0.1.0
 
 The first release: a driver for ST's MP34DT06J, a MEMS microphone with a PDM

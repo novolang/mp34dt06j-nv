@@ -29,6 +29,8 @@ tier = "embedded"
 [dependencies]
 # The PdmIn and PdmInAsync traits and the settings the input is configured
 # with.
-embedded-hal-nv = "^0.3.3"
+# A path dependency until 0.4.0 is published: PATH-DEPENDENCIES.md in the
+# parent directory lists the line that becomes "^0.4.0".
+embedded-hal-nv = { path = "../embedded-hal-nv" }
 # The Microphone and MicrophoneAsync traits and the AudioFormat they answer.
-devices-nv      = "^0.3.3"
+devices-nv      = { path = "../devices-nv" }

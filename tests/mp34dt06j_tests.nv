@@ -71,6 +71,14 @@ impl PdmIn for Pdm
     fn xruns(self) -> Int [hw]
         at(self.st, 9)
 
+    // A gain stage in half-decibel steps, unless the double has none
+    // (state 17 set); state 16 keeps the request.
+    fn set_gain(self, mdb: Int) -> ?Int [hw]
+        if at(self.st, 17) == 1
+            return None
+        self.st.insert(16, mdb)
+        Some(mdb / 500 * 500)
+
 impl PdmInAsync for Pdm
     @tier(app)
     async fn receive(self, n: Int) -> [i32] [hw]
@@ -133,15 +141,20 @@ fn test_the_handle_settings_are_the_clock_the_rate_the_channels_and_the_edge() [
     test.assert(c.edge == PdmEdge.PdmLeftRising)
 
 @test
-fn test_a_configuration_needs_a_clock_in_range_that_is_a_multiple_of_the_rate() [io]
+fn test_a_configuration_needs_a_clock_in_range_and_over_twice_the_rate() [io]
     test.assert(mp34dt06j.config_valid(mp34dt06j.config_left()))
     test.assert(mp34dt06j.config_valid(mp34dt06j.config_pair()))
     let slow = Mp34Config { clock_hz: 1024000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
     test.assert(not mp34dt06j.config_valid(slow))
     let fast = Mp34Config { clock_hz: 3300000, sample_rate: 16000, channels: 1, right: false, startup_ms: 10 }
     test.assert(not mp34dt06j.config_valid(fast))
+    // A clock that is no multiple of the rate is taken since embedded-hal-nv
+    // 0.4.0: the handle runs at the rate its decimation gives.
     let odd = Mp34Config { clock_hz: 1280000, sample_rate: 15000, channels: 1, right: false, startup_ms: 10 }
-    test.assert(not mp34dt06j.config_valid(odd))
+    test.assert(mp34dt06j.config_valid(odd))
+    test.assert_eq(mp34dt06j.decimation(odd), 85)
+    let too_fast = Mp34Config { clock_hz: 1280000, sample_rate: 700000, channels: 1, right: false, startup_ms: 10 }
+    test.assert(not mp34dt06j.config_valid(too_fast))
     let three = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 3, right: false, startup_ms: 10 }
     test.assert(not mp34dt06j.config_valid(three))
     let early = Mp34Config { clock_hz: 1280000, sample_rate: 16000, channels: 1, right: false, startup_ms: -1 }
@@ -289,8 +302,12 @@ fn test_the_microphone_trait_over_the_handle() [io, hw]
     test.assert_eq(m.mic_read(var buf, 4), -1)
 
 @test
-fn test_the_gain_is_the_traits_none_because_the_handle_exposes_none() [io, hw]
-    let m = mp34dt06j.attach(pdm(), mp34dt06j.config_left())
+fn test_the_gain_is_the_handles_step_at_or_below_and_none_without_a_stage() [io, hw]
+    let p = pdm()
+    let m = mp34dt06j.attach(p, mp34dt06j.config_left())
+    test.assert(m.mic_set_gain(MilliDb { mdb: 6200 }) == Some(MilliDb { mdb: 6000 }))
+    test.assert_eq(at(p.st, 16), 6200)
+    p.st.insert(17, 1)
     test.assert(m.mic_set_gain(MilliDb { mdb: 6000 }) == None)
 
 @test

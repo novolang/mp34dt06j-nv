@@ -197,9 +197,10 @@ to `attach`, and uses the trait on the result.
    filter needs to fill, so the samples before it are settling. ST's examples
    discard the first buffers for the same reason. `mic_start` answers the time;
    the program waits it out before it reads.
-2. The clock has to be in the part's range, 1.2 to 3.25 MHz, and a whole multiple
-   of the sample rate. A configuration outside it is refused with -1 and the
-   handle is not touched.
+2. The clock has to be in the part's range, 1.2 to 3.25 MHz, and at least twice
+   the sample rate; it need not be a whole multiple, and the handle runs at the
+   rate its decimation gives (`actual_rate`). A configuration outside it is
+   refused with -1 and the handle is not touched.
 3. A single microphone with LR low is the left channel and is read on the falling
    edge. A single microphone with LR high is read, as the only channel, on the
    rising edge. A pair is read in stereo with the left channel on the falling
@@ -207,9 +208,10 @@ to `attach`, and uses the trait on the result.
    of an odd count would split a frame and is refused.
 4. The handle answers 16-bit samples. `mic_read` refuses `n` above 256, and
    leaves the buffer empty on a refusal.
-5. The gain is fixed: `mic_set_gain` is the trait's `None`. The nRF PDM block has
-   a digital gain of -20 to +20 dB in 0.5 dB steps that Zephyr sets, and `PdmIn`
-   exposes no gain, so the package does not offer one.
+5. The part's sensitivity is fixed. `mic_set_gain` passes the request to the
+   handle's `PdmIn.set_gain`: the nRF PDM block has a digital gain of -20 to
+   +20 dB in 0.5 dB steps that Zephyr sets, and the answer is the step at or
+   below the request. A handle with no gain stage answers `None`.
 6. A sample at full scale means the microphone is past its acoustic overload
    point, 122.5 dB SPL, at the sensitivity above.
 
@@ -218,21 +220,18 @@ to `attach`, and uses the trait on the result.
 - A software decimator from PDM bits to PCM: NOT IMPLEMENTED. A chip with no PDM
   block (the RP2350 does it with a PIO program) needs one in the board's
   handle, behind `PdmIn`.
-- The gain, because `PdmIn` exposes none.
 - The use of the low-power mode and the sleep behaviour of the part.
 - The sampling-edge check against the timing table, and the turn-on time of the
   data sheet: both could not be read.
 
 ## Where the traits fall short
 
-- `PdmConfig` has no gain and no decimation filter choice, so the nRF block's
-  digital gain and its ratio 64 against 80 are the handle's own.
+- `PdmConfig` has no decimation filter choice, so the nRF block's ratio 64
+  against 80 is the handle's own.
 - `PdmIn.receive` answers 16-bit samples as `Vec[i32; 256]`, one `Int` per
   sample; a second of sound is 62.5 buffers.
 - A trait method gets a plain `self`, so the driver keeps no state between calls;
   "not started" is the handle's refusal of a read before `enable`.
-- `Microphone.mic_format` gives an `AudioFraming`, which names I2S edges and has
-  no PDM value; the package reports `AudioPhilips`.
 
 ## Related packages
 
